@@ -1,0 +1,144 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <title>Web单词默写表 v21.0 (免API即用版)</title>
+    <script src="https://cdn.sheetjs.com/xlsx-0.19.3/package/dist/xlsx.full.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.1/html2pdf.bundle.min.js"></script>
+    
+    <style>
+        :root { --primary: #00f3ff; --bg: #0b0b14; --glass: rgba(255, 255, 255, 0.08); }
+        body { font-family: 'Segoe UI', sans-serif; margin: 0; padding: 20px; color: #fff; background-color: var(--bg); min-height: 100vh; }
+        .app-container { max-width: 1000px; margin: 0 auto; }
+        .control-panel { background: var(--glass); padding: 20px; border-radius: 12px; border: 1px solid rgba(255,255,255,0.1); margin-bottom: 20px; position: relative; }
+        textarea { width: 100%; height: 120px; padding: 12px; background: rgba(0,0,0,0.5); border: 1px solid #444; color: #fff; border-radius: 6px; resize: vertical; font-family: monospace; box-sizing: border-box; }
+        .btn-group { display: flex; gap: 10px; margin-top: 15px; }
+        button { flex: 1; padding: 12px; border: none; border-radius: 6px; font-weight: bold; cursor: pointer; color: white; transition: 0.2s; }
+        .btn-gen { background: linear-gradient(135deg, #007bff, #00c6ff); }
+        .btn-excel { background: linear-gradient(135deg, #11998e, #38ef7d); }
+        .btn-pdf { background: linear-gradient(135deg, #ff0055, #ff5e99); }
+        button:disabled { background: #444; cursor: not-allowed; filter: grayscale(1); }
+        .progress-bar { height: 4px; background: var(--primary); width: 0%; transition: width 0.3s; margin-top: 10px; }
+        .status-log { font-size: 12px; color: #aaa; text-align: center; margin-top: 5px; height: 20px; }
+
+        /* A4 预览样式 */
+        .paper-preview { background: white; color: black; width: 210mm; height: 297mm; margin: 0 auto 20px auto; padding: 10mm; box-sizing: border-box; box-shadow: 0 0 20px rgba(0,0,0,0.5); page-break-after: always; }
+        .a4-header { text-align: center; font-weight: bold; font-size: 16px; margin-bottom: 5mm; padding-bottom: 2mm; border-bottom: 2px solid #000; }
+        .a4-body { display: flex; justify-content: space-between; height: 265mm; }
+        .column { width: 48%; }
+        table { width: 100%; border-collapse: collapse; table-layout: fixed; border: 2px solid #000; }
+        th, td { border: 1px solid #000; padding: 0 4px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; vertical-align: middle; }
+        th { background: #eee; text-align: center; font-weight: bold; height: 8mm; font-size: 11px; }
+        td { height: 9mm; font-size: 10.5px; } 
+        td:nth-child(3) { font-size: 9px; } 
+        .col-idx { width: 8%; } .col-word { width: 39%; } .col-def { width: 28%; } .col-chk { width: 25%; }
+    </style>
+</head>
+<body>
+    <div class="app-container">
+        <h1 style="text-align:center; text-shadow:0 0 10px var(--primary);">⚡ 单词默写生成器 (即用版)</h1>
+        <div class="control-panel">
+            <div style="margin-bottom:10px; font-size: 14px; color: #aaa;">✨ 无需API密钥，直接输入单词开始生成</div>
+            <div style="margin-bottom:10px;">
+                <label style="color:#00f3ff; cursor:pointer;"><input type="checkbox" id="hideMode"> 🕵️‍♂️ 默写模式 (隐藏单词)</label>
+            </div>
+            <textarea id="wordInput" placeholder="请输入单词（每行一个）..."></textarea>
+            <div class="progress-bar" id="progBar"></div>
+            <div class="status-log" id="statusLog">准备就绪</div>
+            <div class="btn-group">
+                <button class="btn-gen" id="btnGen" onclick="startGeneration()">🚀 开始查词生成</button>
+                <button class="btn-excel" id="btnExcel" onclick="exportExcel()" disabled>💾 存 Excel</button>
+                <button class="btn-pdf" id="btnPdf" onclick="downloadPDF()" disabled>🔴 下载 PDF</button>
+            </div>
+        </div>
+        <div id="output"></div>
+    </div>
+
+    <script>
+        let globalData = [];
+        const PAGE_CAPACITY = 60; 
+        const COL_CAPACITY = 30;
+
+        // 使用有道公共接口获取释义
+        async function fetchDefinition(word) {
+            const url = `https://corsproxy.io/?` + encodeURIComponent(`https://dict.youdao.com/suggest?num=1&doctype=json&q=${word}`);
+            try {
+                const res = await fetch(url);
+                const json = await res.json();
+                if (json.data && json.data.entries) {
+                    return json.data.entries[0].explain;
+                }
+            } catch (e) {
+                console.error("查词失败:", e);
+                return "未找到释义";
+            }
+            return "未找到释义";
+        }
+
+        async function startGeneration() {
+            const input = document.getElementById('wordInput').value;
+            const lines = input.split('\n').map(l => l.trim()).filter(l => l);
+            const isHide = document.getElementById('hideMode').checked;
+            
+            if (lines.length === 0) return alert("请输入单词");
+
+            document.getElementById('btnGen').disabled = true;
+            document.getElementById('statusLog').innerText = "正在通过有道词典查词...";
+            globalData = [];
+
+            for (let i = 0; i < lines.length; i++) {
+                const pct = ((i+1)/lines.length*100) + '%';
+                document.getElementById('progBar').style.width = pct;
+                document.getElementById('statusLog').innerText = `正在处理 [${i+1}/${lines.length}]: ${lines[i]}`;
+                
+                const def = await fetchDefinition(lines[i]);
+                globalData.push({ idx: i+1, word: lines[i], def: def });
+                
+                // 适当延迟防止被拉黑
+                await new Promise(r => setTimeout(r, 300)); 
+            }
+
+            renderPages(isHide);
+            document.getElementById('btnGen').disabled = false;
+            document.getElementById('btnExcel').disabled = false;
+            document.getElementById('btnPdf').disabled = false;
+            document.getElementById('statusLog').innerHTML = `<span style="color:#00ff00">✅ 生成完毕！</span>`;
+        }
+
+        function renderPages(isHide) {
+            const output = document.getElementById('output');
+            output.innerHTML = "";
+            const totalPages = Math.ceil(globalData.length / PAGE_CAPACITY);
+            for (let p = 0; p < totalPages; p++) {
+                const pageData = globalData.slice(p * PAGE_CAPACITY, (p + 1) * PAGE_CAPACITY);
+                const leftData = pageData.slice(0, COL_CAPACITY);
+                const rightData = pageData.slice(COL_CAPACITY, PAGE_CAPACITY);
+                const div = document.createElement('div'); div.className = 'paper-preview';
+                div.innerHTML = `<div class="a4-header">Vocabulary List - Page ${p+1}</div><div class="a4-body"><div class="column">${buildTable(leftData, isHide)}</div><div class="column">${buildTable(rightData, isHide)}</div></div>`;
+                output.appendChild(div);
+            }
+        }
+
+        function buildTable(data, isHide) {
+            let html = `<table><thead><tr><th class="col-idx">#</th><th class="col-word">${isHide?'默写':'单词'}</th><th class="col-def">释义</th><th class="col-chk">批改</th></tr></thead><tbody>`;
+            for(let i=0; i<COL_CAPACITY; i++) {
+                const item = data[i];
+                html += item ? `<tr><td style="text-align:center">${item.idx}</td><td style="font-weight:bold">${isHide?'':item.word}</td><td title="${item.def}">${item.def}</td><td></td></tr>` : `<tr><td></td><td></td><td></td><td></td></tr>`;
+            }
+            return html + `</tbody></table>`;
+        }
+
+        function downloadPDF() {
+            const opt = { margin: 0, filename: '单词表.pdf', html2canvas: { scale: 2 }, jsPDF: { unit: 'mm', format: 'a4', orientation: 'portrait' } };
+            html2pdf().set(opt).from(document.getElementById('output')).save();
+        }
+
+        function exportExcel() {
+            const sheetData = globalData.map(d => ({ "序号": d.idx, "单词": d.word, "释义": d.def }));
+            const wb = XLSX.utils.book_new(); const ws = XLSX.utils.json_to_sheet(sheetData);
+            XLSX.utils.book_append_sheet(wb, ws, "单词表");
+            XLSX.writeFile(wb, "Vocabulary.xlsx");
+        }
+    </script>
+</body>
+</html>
